@@ -1,5 +1,3 @@
-在参考了提供的 README 文件后,我对其进行了一些修改和扩充,以更好地描述你的 Poe AI Telegram 机器人的功能和使用方法。下面是修改后的 README 文件:
-
 # Poe AI Telegram 机器人
 
 这是一个与 Poe AI API 集成的 Telegram 机器人,允许用户通过 Telegram 与 GPT-4 和 Claude-3-Opus 等 AI 模型进行交互。该机器人支持多个用户,并为每个用户维护对话上下文。
