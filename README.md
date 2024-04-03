@@ -70,13 +70,16 @@
 2. 运行 Docker 容器:
    ```bash
    docker run -d --name poebot \
-     -e TELEGRAM_BOT_TOKEN="your_telegram_bot_token" \
-     -e POE_API_KEY="your_poe_api_key" \
-     -v /path/to/whitelist.txt:/app/whitelist.txt \
-     yourusername/poe-ai-telegram-bot
+     -v $(pwd)/config.ini:/app/config.ini \
+     -v $(pwd)/whitelist.txt:/app/whitelist.txt \
+     hcr.io/timmy-web/poe-bot
    ```
 
    注意将 `your_telegram_bot_token` 和 `your_poe_api_key` 替换为你自己的令牌和 API 密钥,并将 `/path/to/whitelist.txt` 替换为主机上白名单文件的实际路径。
+   或者使用 docker-compose:
+   ```bash
+   docker-compose up -d
+   ```
 
 ## 使用方法
 
