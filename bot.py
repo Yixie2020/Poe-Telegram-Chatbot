@@ -1,29 +1,23 @@
-import asyncio
-import fastapi_poe as fp
-from telegram import Update, constants, error
-from telegram.ext import Application, MessageHandler, filters, CommandHandler
-import logging
 import os
+import asyncio
+import logging
+import fastapi_poe as fp
+from configparser import ConfigParser
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters
+from telegram.constants import ChatAction
+from telegram.error import BadRequest
 
-class GetUpdatesFilter(logging.Filter):
-    def filter(self, record):
-        return "api.telegram.org" not in record.getMessage()
-    
-class CustomHandler(logging.Handler):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.addFilter(GetUpdatesFilter())
+# 读取配置文件
+config = ConfigParser()
+config.read('config.ini')
 
-    def emit(self, record):
-        if not self.filter(record):
-            return
-        print(self.format(record))
+# 获取配置项
+TELEGRAM_BOT_TOKEN = config.get('telegram', 'bot_token')
+POE_API_KEY = config.get('poe', 'api_key')
+ADMIN_ID = int(config.get('telegram', 'admin_id'))
+WHITELIST_FILE = config.get('telegram', 'whitelist_file')
 
-# 配置日志记录器
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', handlers=[CustomHandler()])
-
-# Replace <api_key> with your actual API key, ensuring it is a string.
-api_key = os.environ["POE_API_KEY"]
 bot_names = {
     'gpt4': 'GPT-4',
     'claude3': 'Claude-3-Opus'
@@ -32,6 +26,12 @@ default_bot_name = bot_names['claude3']
 user_tasks = {}
 user_context = {}
 
+# 加载白名单
+whitelist = set()
+if os.path.exists(WHITELIST_FILE):
+    with open(WHITELIST_FILE, 'r') as f:
+        whitelist = set(int(line.strip()) for line in f)
+        
 async def get_responses(api_key, messages, response_list, done, bot_name):
     async for chunk in fp.get_bot_response(messages=messages, bot_name=bot_name, api_key=api_key):
         response_list.append(chunk.text)
@@ -43,7 +43,7 @@ async def update_telegram_message(update, context, response_list, done, response
 
     while not done.is_set():
         if response_list:
-            await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=constants.ChatAction.TYPING)
+            await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
 
             response_text[0] += "".join(response_list)
             response_list.clear()
@@ -61,24 +61,15 @@ async def update_telegram_message(update, context, response_list, done, response
         if response_text[0].strip() != last_response_text.strip():
             await send_response_message(context, update.effective_chat.id, response_text[0], response_message)
 
-async def handle_user_request(user_id, update, context):
-    if user_id in user_context and user_context[user_id]['messages']:
-        response_list = []
-        done = asyncio.Event()
-        response_text = [""]
-        api_task = asyncio.create_task(get_responses(api_key, user_context[user_id]['messages'], response_list, done, user_context[user_id]['bot_name']))
-        telegram_task = asyncio.create_task(update_telegram_message(update, context, response_list, done, response_text))
-
-        await asyncio.gather(api_task, telegram_task)
-
-        # Add the bot's response to the context
-        user_context[user_id]['messages'].append(fp.ProtocolMessage(role="bot", content=response_text[0]))
-
 async def handle_message(update: Update, context):
     user_id = update.effective_user.id
+    if user_id not in whitelist:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="您没有权限使用此机器人,请联系管理员添加白名单。")
+        return
+
     logging.info(f"开始处理用户 {user_id} 的请求")
     user_input = update.message.text
-    message = fp.ProtocolMessage(role="user", content=user_input)
+    message = {"role": "user", "content": user_input}
 
     # 获取用户上下文
     if user_id not in user_context:
@@ -90,6 +81,19 @@ async def handle_message(update: Update, context):
     if user_id not in user_tasks or user_tasks[user_id].done():
         user_tasks[user_id] = asyncio.create_task(handle_user_request(user_id, update, context))
 
+async def handle_user_request(user_id, update, context):
+    if user_id in user_context and user_context[user_id]['messages']:
+        response_list = []
+        done = asyncio.Event()
+        response_text = [""]
+        api_task = asyncio.create_task(get_responses(POE_API_KEY, user_context[user_id]['messages'], response_list, done, user_context[user_id]['bot_name']))
+        telegram_task = asyncio.create_task(update_telegram_message(update, context, response_list, done, response_text))
+
+        await asyncio.gather(api_task, telegram_task)
+
+        # Add the bot's response to the context
+        user_context[user_id]['messages'].append({"role": "assistant", "content": response_text[0]})
+
 async def send_response_message(context, chat_id, response_text, response_message=None):
     if response_text.strip():
         try:
@@ -97,7 +101,7 @@ async def send_response_message(context, chat_id, response_text, response_messag
                 response_message = await context.bot.send_message(chat_id=chat_id, text=response_text, parse_mode="Markdown")
             else:
                 await response_message.edit_text(response_text, parse_mode="Markdown")
-        except error.BadRequest:
+        except BadRequest:
             if response_message is None:
                 response_message = await context.bot.send_message(chat_id=chat_id, text=response_text)
             else:
@@ -133,9 +137,49 @@ async def switch_model(user_id, bot_name, update, context):
     else:
         await context.bot.send_message(chat_id=update.effective_chat.id, text=f"当前已经是 {bot_name} 模型。")
 
-def main():
-    application = Application.builder().token(os.environ["TELEGRAM_BOT_TOKEN"]).build()
+async def add_whitelist(update: Update, context):
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="您没有权限执行此操作。")
+        return
 
+    if not context.args:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="请提供要添加到白名单的用户ID。")
+        return
+
+    try:
+        new_user_id = int(context.args[0])
+        whitelist.add(new_user_id)
+        with open(WHITELIST_FILE, 'a') as f:
+            f.write(f"{new_user_id}\n")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"已将用户 {new_user_id} 添加到白名单。")
+    except ValueError:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="无效的用户ID。")
+
+async def del_whitelist(update: Update, context):
+        user_id = update.effective_user.id
+        if user_id != ADMIN_ID:
+            await context.bot.send_message(chat_id=update.effective_chat.id, text="您没有权限执行此操作。")
+            return
+
+        if not context.args:
+            await context.bot.send_message(chat_id=update.effective_chat.id, text="请提供要从白名单移除的用户ID，格式为add userid")
+            return
+
+        try:
+            remove_user_id = int(context.args[0])
+            if remove_user_id in whitelist:
+                whitelist.remove(remove_user_id)
+                with open(WHITELIST_FILE, 'w') as f:
+                    f.write("\n".join(str(uid) for uid in whitelist))
+                await context.bot.send_message(chat_id=update.effective_chat.id, text=f"已将用户 {remove_user_id} 从白名单移除。")
+            else:
+                await context.bot.send_message(chat_id=update.effective_chat.id, text=f"用户 {remove_user_id} 不在白名单中。")
+        except ValueError:
+            await context.bot.send_message(chat_id=update.effective_chat.id, text="无效的用户ID。")
+
+def main():
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     start_handler = CommandHandler('start', start)
     application.add_handler(start_handler)
 
@@ -150,6 +194,12 @@ def main():
 
     claude3_handler = CommandHandler('claude3', claude3)
     application.add_handler(claude3_handler)
+
+    add_whitelist_handler = CommandHandler('add', add_whitelist)
+    application.add_handler(add_whitelist_handler)
+
+    del_whitelist_handler = CommandHandler('del', del_whitelist)
+    application.add_handler(del_whitelist_handler)
 
     # 运行
     application.run_polling()
