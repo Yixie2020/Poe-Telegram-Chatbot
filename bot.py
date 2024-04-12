@@ -86,13 +86,18 @@ async def handle_user_request(user_id, update, context):
         response_list = []
         done = asyncio.Event()
         response_text = [""]
-        api_task = asyncio.create_task(get_responses(POE_API_KEY, user_context[user_id]['messages'], response_list, done, user_context[user_id]['bot_name']))
-        telegram_task = asyncio.create_task(update_telegram_message(update, context, response_list, done, response_text))
+        
+        try:
+            api_task = asyncio.create_task(get_responses(POE_API_KEY, user_context[user_id]['messages'], response_list, done, user_context[user_id]['bot_name']))
+            telegram_task = asyncio.create_task(update_telegram_message(update, context, response_list, done, response_text))
 
-        await asyncio.gather(api_task, telegram_task)
+            await asyncio.gather(api_task, telegram_task)
 
-        # Add the bot's response to the context
-        user_context[user_id]['messages'].append({"role": "assistant", "content": response_text[0]})
+            # Add the bot's response to the context
+            user_context[user_id]['messages'].append({"role": "bot", "content": response_text[0]})
+        except Exception as e:
+            logging.exception(f"处理用户 {user_id} 请求时发生异常: {str(e)}")
+            await context.bot.send_message(chat_id=update.effective_chat.id, text="很抱歉,处理您的请求时发生错误。")
 
 async def send_response_message(context, chat_id, response_text, response_message=None):
     if response_text.strip():
